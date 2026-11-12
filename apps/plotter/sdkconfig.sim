@@ -1,0 +1,5 @@
+# Plotter firmware with the simulated MCU (tools/sim_bridge.py) on the
+# console port:  idf.py -B ../../build/plotter_cyd_sim \
+#   -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.sim" set-target esp32 build
+CONFIG_PLOTTER_SIM_HOMING=y
+CONFIG_PLOTTER_AUTOSTART="square.gcode"

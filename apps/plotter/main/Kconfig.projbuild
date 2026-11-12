@@ -1,0 +1,59 @@
+menu "Plotter"
+    config PLOTTER_NETWORK
+        bool "WiFi + Moonraker API (Mainsail)"
+        default y if IDF_TARGET_ESP32S3
+        default n
+        help
+            CoreS3: on.  CYD (no PSRAM): off, the board uses its touch
+            screen and microSD card instead (design decision: the CYD has
+            not enough RAM for WiFi next to the plotter).
+    config PLOTTER_WIFI_SSID
+        string "WiFi SSID"
+        depends on PLOTTER_NETWORK
+        default ""
+    config PLOTTER_WIFI_PASSWORD
+        string "WiFi password"
+        depends on PLOTTER_NETWORK
+        default ""
+    config PLOTTER_HOSTNAME
+        string "Host name"
+        depends on PLOTTER_NETWORK
+        default "esp32klipper"
+    config PLOTTER_CYD
+        bool "CYD touch screen + microSD card"
+        depends on IDF_TARGET_ESP32
+        default y
+        help
+            ESP32-2432S028R: LVGL screen (Status / Files / Move) and the
+            G-code files of the microSD card (SPI3: SCK 18, MISO 19,
+            MOSI 23, CS 5).  Without a card, the files of the internal
+            storage (/data/gcodes) are used.  printer.cfg in the card's
+            root replaces the internal one.
+    config PLOTTER_CORES3_SCREEN
+        bool "CoreS3 touch screen"
+        depends on IDF_TARGET_ESP32S3
+        default y
+        help
+            The same screen as on the CYD (Status / Files / Move) next to
+            Mainsail.
+    config PLOTTER_SD_MHZ
+        int "microSD SPI clock (MHz)"
+        depends on PLOTTER_CYD
+        default 20
+    config PLOTTER_MCU_PORT
+        string "MCU serial port (empty = [mcu] serial of printer.cfg)"
+        default ""
+        help
+            usbjtag (CoreS3) or uart:0:1:3 (CYD) to use the simulated MCU on
+            the PC through tools/sim_bridge.py: the console then stays
+            quiet while the link runs.
+    config PLOTTER_AUTOSTART
+        string "Print this file when ready (G28 X Y first; empty = off)"
+        default ""
+        help
+            For trying the board without touching it, e.g. square.gcode
+            (examples/) with the simulated MCU.
+    config PLOTTER_SIM_HOMING
+        bool "Simulated MCU: trigger the X/Y DIAG pins on G28"
+        default n
+endmenu

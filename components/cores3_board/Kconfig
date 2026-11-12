@@ -1,0 +1,17 @@
+menu "M5Stack CoreS3 board"
+    config CORES3_LCD_PCLK_MHZ
+        int "Display SPI clock (MHz)"
+        default 40
+    config CORES3_LCD_MADCTL
+        hex "ILI9342C MADCTL (orientation / color order)"
+        default 0x08
+        help
+            0x08: landscape, BGR.  0x00 if red and blue are swapped,
+            0xC8 if the picture is upside down.
+    config CORES3_LCD_INVERT
+        bool "Invert display colors"
+        default y
+    config CORES3_TOUCH_SHOW
+        bool "Show a dot where the screen is touched (check)"
+        default n
+endmenu

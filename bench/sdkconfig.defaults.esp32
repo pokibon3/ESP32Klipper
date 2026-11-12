@@ -1,0 +1,2 @@
+# CYD (ESP32-2432S028R): console on UART0 via the on-board USB serial chip
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y

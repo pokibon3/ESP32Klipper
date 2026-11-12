@@ -1,0 +1,1 @@
+CONFIG_PLOTTER_MCU_PORT="usbjtag"

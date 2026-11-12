@@ -1,0 +1,52 @@
+menu "CYD board (ESP32-2432S028R)"
+    choice CYD_LCD_CONTROLLER
+        prompt "Display controller"
+        default CYD_LCD_ILI9341
+        help
+            ESP32-2432S028R boards come with either display controller
+            (the versions with two USB connectors usually have the ST7789).
+        config CYD_LCD_ILI9341
+            bool "ILI9341"
+        config CYD_LCD_ST7789
+            bool "ST7789"
+    endchoice
+    config CYD_LCD_PCLK_MHZ
+        int "Display SPI clock (MHz)"
+        default 40
+    config CYD_LCD_MADCTL
+        hex "Display MADCTL (orientation)"
+        default 0x68 if CYD_LCD_ST7789
+        default 0x28
+        help
+            0x28: landscape, USB connector on the right (MV + BGR); the
+            ST7789 panels need 0x68 (MY flipped against the ILI9341).
+            0xE8: landscape rotated 180 degrees (MX + MY + MV + BGR).
+            Same bits on both controllers; 0x20 / 0xE0 if red and blue are
+            swapped.
+    config CYD_LCD_INVERT
+        bool "Invert display colors"
+        default y if CYD_LCD_ST7789
+        default n
+        help
+            The ST7789 panels of the CYD need inverted colors (on), the
+            ILI9341 ones do not.  Change it if black shows as white.
+    config CYD_TOUCH_SWAP_XY
+        bool "Touch: swap X and Y"
+        default y if CYD_LCD_ST7789
+        default n
+    config CYD_TOUCH_X_MIN
+        int "Touch: raw value at the left edge"
+        default 200
+    config CYD_TOUCH_X_MAX
+        int "Touch: raw value at the right edge"
+        default 3700
+    config CYD_TOUCH_Y_MIN
+        int "Touch: raw value at the top edge"
+        default 240
+    config CYD_TOUCH_Y_MAX
+        int "Touch: raw value at the bottom edge"
+        default 3800
+    config CYD_TOUCH_SHOW
+        bool "Show a dot where the screen is touched (calibration check)"
+        default n
+endmenu

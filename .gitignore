@@ -1,0 +1,9 @@
+/build/
+/third_party/klipper/
+bench/sdkconfig
+bench/sdkconfig.old
+# Test data (not for publication)
+/bench/data/*.gcode
+/bench/data/*.cfg
+/.claude/
+.DS_Store

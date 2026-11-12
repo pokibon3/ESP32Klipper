@@ -1,0 +1,46 @@
+menu "Link test"
+    config LINK_TEST_PORT
+        string "MCU serial port"
+        default "uart:0:1:3"
+        help
+            uart:<num>:<tx>:<rx>.  uart:0:1:3 shares the console UART with
+            the link (simulated MCU through tools/sim_bridge.py; logging is
+            muted while the link runs).  uart:2:27:22 is the CYD -> SKR Pico
+            wiring from the design document.
+    choice LINK_TEST_WHICH
+        prompt "Test to run"
+        default LINK_TEST_M4_SDCARD
+        config LINK_TEST_M2
+            bool "M2: one axis"
+        config LINK_TEST_M3
+            bool "M3: CoreXY squares from printer.cfg"
+        config LINK_TEST_M4
+            bool "M4: homing (sensorless X/Y, switch Z)"
+        config LINK_TEST_M4_SDCARD
+            bool "M4: SD print with pause/resume/cancel (private data)"
+        config LINK_TEST_UI_DEMO
+            bool "M4: local UI demo (interactive, private data optional)"
+            help
+                Connects to the (simulated) MCU and runs the printer from the
+                touch screen for LINK_TEST_DEMO_MINUTES.  Files: square.gcode
+                and, when bench/data is present, card_opt.gcode.
+        config LINK_TEST_M4_MACROS
+            bool "M4: existing printer.cfg macros + drawing file"
+            help
+                Needs bench/data/fraxinus0pen_printer.cfg and
+                bench/data/card_opt.gcode (private test data).
+    endchoice
+    config LINK_TEST_UI
+        bool "Show the local UI (CYD display + touch)"
+        default y
+    config LINK_TEST_DEMO_MINUTES
+        int "UI demo: minutes to run"
+        default 20
+        depends on LINK_TEST_UI_DEMO
+    config LINK_TEST_MAX_LINES
+        int "M4 macros: G-code lines to run"
+        default 100000
+    config LINK_TEST_DISTANCE
+        int "M2 move distance (mm)"
+        default 100
+endmenu

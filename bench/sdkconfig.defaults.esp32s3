@@ -1,0 +1,3 @@
+# M5Stack CoreS3: console on the native USB port (USB Serial/JTAG)
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
