@@ -232,6 +232,9 @@ main(int argc, char **argv)
     s.print.print_duration = 131.6;
     be.changed();
     ui.update();
+    ui.show_tab(kl::PlotterUi::TAB_STATUS);
+    render();
+    write_png(out + "/4c_status_complete.png");
     ui.show_tab(kl::PlotterUi::TAB_FILES);
     render();
     write_png(out + "/5_files.png");

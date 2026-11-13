@@ -133,7 +133,7 @@ ESP-IDF の UART は既定でテキスト用の改行変換（受信 CR→LF、�
 
 ### ローカル UI（CYD の画面とタッチ）
 
-LVGL 8.4（`third_party/lvgl`、無改変）で 320×240 の画面を作る。タブは Status（状態、ファイル、進み具合、一時停止・再開・中止）、Files（ファイルを選んで印刷）、Move（XY の移動、原点復帰、ペンの上げ下げ、モータ OFF）の 3 つ。UI は別タスク（コア 0）で動き、klippy からは 0.2 秒ごとに作る状態のコピー（`Printer::snapshot()`）を読み、操作は G-code として `submit_script()` に渡す。
+LVGL 8.4（`third_party/lvgl`、無改変）で 320×240 の画面を作る。タブは Status（状態、ファイル、進み具合、一時停止・再開・中止、終わったあとの再印刷 Reprint）、Files（ファイルを選んで印刷）、Move（XY の移動、原点復帰、ペンの上げ下げ、モータ OFF）の 3 つ。UI は別タスク（コア 0）で動き、klippy からは 0.2 秒ごとに作る状態のコピー（`Printer::snapshot()`）を読み、操作は G-code として `submit_script()` に渡す。
 
 ```sh
 ./build/host/ui_screens build/ui_screens   # 各画面を PNG に出力（実機なしで配置を確認）

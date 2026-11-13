@@ -373,10 +373,13 @@ PlotterUi::build_status(lv_obj_t *tab)
         w_->btn_pause,
         [](lv_event_t *e) {
             auto *self = (PlotterUi *)lv_event_get_user_data(e);
-            if (self->snap_.print.state == "paused")
+            const std::string &ps = self->snap_.print.state;
+            if (ps == "paused")
                 self->backend_.run_gcode("RESUME");
-            else
+            else if (ps == "printing")
                 self->backend_.run_gcode("PAUSE");
+            else if (!self->snap_.print.filename.empty())
+                self->confirm_print(self->snap_.print.filename); // Reprint
         },
         LV_EVENT_CLICKED, this);
 
@@ -1143,14 +1146,20 @@ PlotterUi::apply(const PrinterSnapshot &s)
     if (lv_obj_get_y(w_->message) != (shutdown ? 34 : 86))
         lv_obj_align(w_->message, LV_ALIGN_TOP_LEFT, 0, shutdown ? 34 : 86);
 
-    const char *pause_text = paused ? LV_SYMBOL_PLAY " Resume"
-                                    : LV_SYMBOL_PAUSE " Pause";
+    // Left button: Pause / Resume during a job, Reprint after one
+    bool reprint = !printing && !paused && have_job;
+    const char *pause_text = paused    ? LV_SYMBOL_PLAY " Resume"
+                             : reprint ? LV_SYMBOL_REFRESH " Reprint"
+                                       : LV_SYMBOL_PAUSE " Pause";
     if (strcmp(lv_label_get_text(lv_obj_get_child(w_->btn_pause, 0)),
                pause_text) != 0) {
         set_button_text(w_->btn_pause, pause_text);
         lv_obj_set_style_bg_color(
             w_->btn_pause,
-            lv_palette_main(paused ? LV_PALETTE_GREEN : LV_PALETTE_AMBER), 0);
+            lv_palette_main(paused    ? LV_PALETTE_GREEN
+                            : reprint ? LV_PALETTE_BLUE
+                                      : LV_PALETTE_AMBER),
+            0);
     }
     bool job = s.ready && (printing || paused);
     set_visible(w_->speed_row, job);
@@ -1158,7 +1167,10 @@ PlotterUi::apply(const PrinterSnapshot &s)
         snprintf(buf, sizeof(buf), "Speed %d%%", (int)lround(s.speed_factor));
         set_text(w_->speed, buf);
     }
-    set_enabled(w_->btn_pause, s.ready && (printing || paused));
+    set_enabled(w_->btn_pause,
+                s.ready
+                    && (printing || paused
+                        || (reprint && !s.busy && !s.queued)));
     set_enabled(w_->btn_cancel, s.ready && (printing || paused));
 
     // Move tab: only while idle
