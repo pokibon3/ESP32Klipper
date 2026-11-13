@@ -129,6 +129,20 @@ public:
                 "Up 0:12:34"};
     }
     void changed() { s.seq++; }
+    // WiFi (CoreS3)
+    bool ap = false;
+    bool wifi_supported() override { return true; }
+    std::string wifi_status() override {
+        return ap ? "AP ESP32Klipper-3D8C / pass k7mq2xht\n"
+                    "Mainsail: http://192.168.4.1/"
+                  : "Connected: home-network (192.168.1.217)";
+    }
+    bool wifi_scan_results(std::vector<kl::WifiNetwork> *out) override {
+        *out = {{"home-network", -44, true}, {"home-network-5G", -58, true},
+                {"cafe free wifi", -71, false}, {"neighbor", -83, true}};
+        return true;
+    }
+    bool wifi_ap_mode() override { return ap; }
 };
 
 void
@@ -241,6 +255,16 @@ main(int argc, char **argv)
     render();
     write_png(out + "/6d_confirm_estop.png");
     ui.close_dialog();
+    // WiFi pages
+    ui.show_wifi();
+    ui.update();
+    render();
+    write_png(out + "/6e_wifi.png");
+    be.ap = true;
+    ui.update();
+    render();
+    write_png(out + "/6f_wifi_ap.png");
+    ui.close_wifi();
     ui.show_tab(kl::PlotterUi::TAB_MOVE);
 
     // Error toast (jog before homing)

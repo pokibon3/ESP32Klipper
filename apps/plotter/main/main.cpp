@@ -222,6 +222,8 @@ start_screen(kl::Printer &p, const std::string &gcode_dir)
                           const std::string &password) override {
             wifi::join(ssid, password);
         }
+        bool wifi_ap_mode() override { return wifi::ap_mode(); }
+        void wifi_set_ap_mode(bool on) override { wifi::set_ap_mode(on); }
     };
     static Backend backend(p);
 #else
@@ -238,10 +240,17 @@ start_screen(kl::Printer &p, const std::string &gcode_dir)
         l.push_back("Board: " CONFIG_IDF_TARGET);
 #endif
 #if CONFIG_PLOTTER_NETWORK
-        std::string ip = wifi::ip();
+        std::string host = wifi::host();
         snprintf(buf, sizeof(buf), "Mainsail: http://%s/",
-                 ip.empty() ? "(no WiFi)" : ip.c_str());
+                 host.empty() ? "(no WiFi)" : host.c_str());
         l.push_back(buf);
+        if (wifi::ap_mode() || wifi::ip().empty()) {
+            // Access point name and password (for the phone)
+            std::string st = wifi::status();
+            size_t nl = st.find('\n');
+            l.push_back(wifi::ap_mode() ? st.substr(0, nl)
+                        : nl == std::string::npos ? st : st.substr(nl + 1));
+        }
 #endif
         l.push_back(files_line);
         snprintf(buf, sizeof(buf), "RAM free %u KB (lowest %u KB)",

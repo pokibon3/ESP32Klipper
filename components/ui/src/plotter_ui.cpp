@@ -148,6 +148,8 @@ struct PlotterUi::Widgets {
     lv_obj_t *btn_wifi = nullptr;
     // WiFi pages (on the top layer while open)
     lv_obj_t *wifi_page = nullptr, *wifi_status = nullptr, *wifi_list = nullptr;
+    lv_obj_t *wifi_ap_btn = nullptr;
+    int wifi_ap_shown = -1; // AP mode shown on wifi_ap_btn
     lv_obj_t *pw_page = nullptr, *pw_text = nullptr;
     // error toast
     lv_obj_t *toast = nullptr, *toast_label = nullptr;
@@ -714,7 +716,7 @@ PlotterUi::show_wifi()
     w_->wifi_page = pg;
     lv_obj_t *title = lv_label_create(pg);
     lv_obj_set_style_text_font(title, kFontMid, 0);
-    lv_label_set_text(title, LV_SYMBOL_WIFI " WiFi");
+    lv_label_set_text(title, LV_SYMBOL_WIFI); // buttons fill the row
     lv_obj_align(title, LV_ALIGN_TOP_LEFT, 0, 4);
     lv_obj_t *close = make_button(pg, LV_SYMBOL_CLOSE,
                                   lv_palette_main(LV_PALETTE_GREY), 48, 32);
@@ -726,8 +728,34 @@ PlotterUi::show_wifi()
         },
         LV_EVENT_CLICKED, this);
     lv_obj_t *scan = make_button(pg, LV_SYMBOL_REFRESH " Scan",
-                                 lv_palette_main(LV_PALETTE_BLUE), 90, 32);
-    lv_obj_align(scan, LV_ALIGN_TOP_RIGHT, -56, 0);
+                                 lv_palette_main(LV_PALETTE_BLUE), 80, 32);
+    lv_obj_align(scan, LV_ALIGN_TOP_RIGHT, -54, 0);
+    // Access point mode on / off
+    w_->wifi_ap_btn = make_button(pg, "AP mode",
+                                  lv_palette_main(LV_PALETTE_TEAL), 92, 32);
+    lv_obj_align(w_->wifi_ap_btn, LV_ALIGN_TOP_RIGHT, -140, 0);
+    w_->wifi_ap_shown = -1;
+    lv_obj_add_event_cb(
+        w_->wifi_ap_btn,
+        [](lv_event_t *e) {
+            auto *self = (PlotterUi *)lv_event_get_user_data(e);
+            if (self->backend_.wifi_ap_mode()) {
+                self->confirm("Join WiFi?",
+                              "Leave access point mode and join the saved "
+                              "network.",
+                              "Join", [self] {
+                                  self->backend_.wifi_set_ap_mode(false);
+                              });
+            } else {
+                self->confirm("Access point mode?",
+                              "This board becomes its own WiFi network. "
+                              "Mainsail: http://192.168.4.1/",
+                              "AP mode", [self] {
+                                  self->backend_.wifi_set_ap_mode(true);
+                              });
+            }
+        },
+        LV_EVENT_CLICKED, this);
     lv_obj_add_event_cb(
         scan,
         [](lv_event_t *e) {
@@ -801,6 +829,11 @@ void
 PlotterUi::update_wifi()
 {
     set_text(w_->wifi_status, backend_.wifi_status().c_str());
+    int ap = backend_.wifi_ap_mode() ? 1 : 0;
+    if (ap != w_->wifi_ap_shown) {
+        w_->wifi_ap_shown = ap;
+        set_button_text(w_->wifi_ap_btn, ap ? "Use WiFi" : "AP mode");
+    }
     if (wifi_scanning_ && backend_.wifi_scan_results(&wifi_nets_)) {
         wifi_scanning_ = false;
         fill_wifi_list();
@@ -868,6 +901,7 @@ PlotterUi::close_wifi()
     if (w_->wifi_page) {
         lv_obj_del(w_->wifi_page);
         w_->wifi_page = nullptr;
+        w_->wifi_ap_btn = nullptr;
     }
     wifi_scanning_ = false;
 }

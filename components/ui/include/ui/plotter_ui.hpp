@@ -55,6 +55,9 @@ public:
     virtual bool wifi_scan_results(std::vector<WifiNetwork> *) { return true; }
     virtual void wifi_connect(const std::string &ssid,
                               const std::string &password) {}
+    // Access point mode (the board is its own network; saved)
+    virtual bool wifi_ap_mode() { return false; }
+    virtual void wifi_set_ap_mode(bool on) {}
 };
 
 // Backend on a Printer in the same process

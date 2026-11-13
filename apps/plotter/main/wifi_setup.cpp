@@ -17,6 +17,7 @@
 #include "esp_mac.h"
 #include "esp_netif.h"
 #include "esp_timer.h"
+#include "esp_random.h"
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
@@ -31,6 +32,9 @@ const char *NVS_NS = "wifi";
 // each try moves the radio to the network's channel and drops the phone
 // on the setup page for a moment.
 const uint64_t AP_RETRY_US = 30 * 1000000ULL;
+// Failed tries in a row (while joined before) before the access point
+// opens again: ~1 min with a wrong password
+const int AP_AFTER_FAILS = 10;
 // After joining, keep the access point this long (the setup page shows
 // the result), then close it
 const uint64_t AP_CLOSE_US = 60 * 1000000ULL;
@@ -38,8 +42,10 @@ const uint64_t AP_CLOSE_US = 60 * 1000000ULL;
 std::mutex lock;
 EventGroupHandle_t events;
 esp_timer_handle_t retry_timer, close_timer, join_timer;
-std::string ssid_, pass_, ip_, ap_name_;
+std::string ssid_, pass_, ip_, ap_name_, ap_pass_;
 bool ap_on_ = false, scanning_ = false, scan_done_ = false;
+// Access point mode: the board is the network (no other network joined)
+bool ap_mode_ = false;
 std::vector<kl::WifiNetwork> nets_;
 int fails_ = 0;
 
@@ -74,6 +80,49 @@ save(const std::string &ssid, const std::string &pass)
     nvs_close(h);
 }
 
+// Access point settings: the mode, and the password made once per board
+// (menuconfig's password instead when set)
+void
+load_ap()
+{
+    nvs_handle_t h;
+    if (nvs_open(NVS_NS, NVS_READWRITE, &h) != ESP_OK)
+        return;
+    uint8_t mode = 0;
+    nvs_get_u8(h, "mode", &mode);
+    ap_mode_ = mode == 1;
+    char p[65] = "";
+    size_t lp = sizeof(p);
+    if (nvs_get_str(h, "ap_pass", p, &lp) != ESP_OK || strlen(p) < 8) {
+        // No 0/O, 1/l/I: read from the screen
+        const char *chars = "abcdefghijkmnpqrstuvwxyz23456789";
+        for (int i = 0; i < 8; i++)
+            p[i] = chars[esp_random() % 32];
+        p[8] = 0;
+        nvs_set_str(h, "ap_pass", p);
+        nvs_commit(h);
+    }
+    nvs_close(h);
+    ap_pass_ = strlen(CONFIG_PLOTTER_AP_PASSWORD) >= 8
+                   ? CONFIG_PLOTTER_AP_PASSWORD : p;
+    uint8_t mac[6];
+    esp_read_mac(mac, ESP_MAC_WIFI_SOFTAP);
+    char name[32];
+    snprintf(name, sizeof(name), "ESP32Klipper-%02X%02X", mac[4], mac[5]);
+    ap_name_ = name;
+}
+
+void
+save_mode(bool ap)
+{
+    nvs_handle_t h;
+    if (nvs_open(NVS_NS, NVS_READWRITE, &h) != ESP_OK)
+        return;
+    nvs_set_u8(h, "mode", ap ? 1 : 0);
+    nvs_commit(h);
+    nvs_close(h);
+}
+
 void
 apply_sta_config()
 {
@@ -88,26 +137,22 @@ open_ap()
 {
     if (ap_on_)
         return;
-    uint8_t mac[6];
-    esp_read_mac(mac, ESP_MAC_WIFI_SOFTAP);
-    char name[32];
-    snprintf(name, sizeof(name), "ESP32Klipper-%02X%02X", mac[4], mac[5]);
     wifi_config_t ac = {};
-    strncpy((char *)ac.ap.ssid, name, sizeof(ac.ap.ssid));
-    ac.ap.ssid_len = strlen(name);
-    const char *pw = CONFIG_PLOTTER_AP_PASSWORD;
-    strncpy((char *)ac.ap.password, pw, sizeof(ac.ap.password));
-    ac.ap.authmode = strlen(pw) >= 8 ? WIFI_AUTH_WPA2_PSK : WIFI_AUTH_OPEN;
+    strncpy((char *)ac.ap.ssid, ap_name_.c_str(), sizeof(ac.ap.ssid));
+    ac.ap.ssid_len = ap_name_.size();
+    strncpy((char *)ac.ap.password, ap_pass_.c_str(), sizeof(ac.ap.password));
+    ac.ap.authmode = WIFI_AUTH_WPA2_PSK;
     ac.ap.max_connection = 2;
     ac.ap.channel = 1;
+    // AP + station: the station scans (network list) and joins
     esp_wifi_set_mode(WIFI_MODE_APSTA);
     esp_wifi_set_config(WIFI_IF_AP, &ac);
     {
         std::lock_guard<std::mutex> g(lock);
         ap_on_ = true;
-        ap_name_ = name;
     }
-    ESP_LOGW(TAG, "setup access point %s: http://192.168.4.1/wifi", name);
+    ESP_LOGW(TAG, "access point %s (password %s): http://192.168.4.1/",
+             ap_name_.c_str(), ap_pass_.c_str());
 }
 
 void
@@ -115,7 +160,7 @@ close_ap(void *)
 {
     {
         std::lock_guard<std::mutex> g(lock);
-        if (!ap_on_ || ip_.empty())
+        if (!ap_on_ || ip_.empty() || ap_mode_)
             return;
         ap_on_ = false;
     }
@@ -128,7 +173,7 @@ retry(void *)
     bool go;
     {
         std::lock_guard<std::mutex> g(lock);
-        go = !scanning_ && ip_.empty() && !ssid_.empty();
+        go = !scanning_ && ip_.empty() && !ssid_.empty() && !ap_mode_;
     }
     if (go)
         esp_wifi_connect();
@@ -145,6 +190,8 @@ on_event(void *, esp_event_base_t base, int32_t id, void *data)
         {
             std::lock_guard<std::mutex> g(lock);
             ip_.clear();
+            if (ap_mode_)
+                return;
             fails = ++fails_;
             ap = ap_on_;
             scanning = scanning_;
@@ -154,7 +201,7 @@ on_event(void *, esp_event_base_t base, int32_t id, void *data)
             return; // SCAN_DONE tries again
         // Network gone or wrong password (e.g. after joining another one
         // from the screen): the setup access point again
-        if (!ap && fails >= 20) {
+        if (!ap && fails >= AP_AFTER_FAILS) {
             open_ap();
             ap = true;
         }
@@ -329,6 +376,13 @@ get_page(httpd_req_t *req)
          "placeholder='Password (empty: open network)'>"
          "<button type='submit'>Join</button></form>"
          "<p><a href='/wifi?scan=1'>Scan again</a></p>";
+    if (!ap_mode())
+        b += "<form method='post' action='/wifi'>"
+             "<input type='hidden' name='mode' value='ap'>"
+             "<p><button type='submit' style='background:#00897b'>"
+             "Use as access point</button><br><small>The board becomes its "
+             "own WiFi network (" + html_escape(ap_name()) + "); Mainsail at "
+             "http://192.168.4.1/</small></p></form>";
     return send_page(req, b);
 }
 
@@ -346,6 +400,13 @@ post_page(httpd_req_t *req)
         if (r <= 0)
             return ESP_FAIL;
         got += r;
+    }
+    if (form_value(body, "mode") == "ap") {
+        set_ap_mode(true);
+        return send_page(req, "<p>Access point mode: join <b>"
+                                  + html_escape(ap_name()) + "</b> (password "
+                                  "on the board's screen), then open "
+                                  "http://192.168.4.1/</p>");
     }
     std::string ssid = form_value(body, "other");
     if (ssid.empty())
@@ -398,11 +459,17 @@ start(int wait_ms)
         ssid_ = CONFIG_PLOTTER_WIFI_SSID;
         pass_ = CONFIG_PLOTTER_WIFI_PASSWORD;
     }
+    load_ap();
     esp_wifi_set_mode(WIFI_MODE_STA);
     apply_sta_config();
     // Keep latency low for the WebSocket (no modem sleep)
     esp_wifi_set_ps(WIFI_PS_NONE);
     esp_wifi_start();
+    if (ap_mode_) {
+        open_ap();
+        scan_start();
+        return false;
+    }
     bool joined = false;
     if (!ssid_.empty())
         joined = xEventGroupWaitBits(events, 1, pdFALSE, pdTRUE,
@@ -412,6 +479,13 @@ start(int wait_ms)
         scan_start(); // ready for the setup page
     }
     return joined;
+}
+
+std::string
+ap_name()
+{
+    std::lock_guard<std::mutex> g(lock);
+    return ap_name_;
 }
 
 std::string
@@ -426,6 +500,9 @@ status()
 {
     std::lock_guard<std::mutex> g(lock);
     std::string s;
+    if (ap_mode_)
+        return "AP " + ap_name_ + " / pass " + ap_pass_
+               + "\nMainsail: http://192.168.4.1/";
     if (!ip_.empty())
         s = "Connected: " + ssid_ + " (" + ip_ + ")";
     else if (ssid_.empty())
@@ -433,7 +510,7 @@ status()
     else
         s = "Connecting: " + ssid_ + (fails_ ? " (failed, retrying)" : "");
     if (ap_on_)
-        s += "\nSetup AP: " + ap_name_ + " -> http://192.168.4.1/wifi";
+        s += "\nSetup AP " + ap_name_ + " / pass " + ap_pass_;
     return s;
 }
 
@@ -476,11 +553,13 @@ void
 join(const std::string &ssid, const std::string &password)
 {
     save(ssid, password);
+    save_mode(false);
     {
         std::lock_guard<std::mutex> g(lock);
         ssid_ = ssid;
         pass_ = password;
         fails_ = 0;
+        ap_mode_ = false; // the access point closes once joined
     }
     ESP_LOGW(TAG, "joining %s", ssid.c_str());
     // Shortly, so that the setup page's answer goes out first (joining
@@ -488,6 +567,44 @@ join(const std::string &ssid, const std::string &password)
     esp_timer_stop(retry_timer);
     esp_timer_stop(join_timer);
     esp_timer_start_once(join_timer, 1000000);
+}
+
+void
+set_ap_mode(bool on)
+{
+    save_mode(on);
+    {
+        std::lock_guard<std::mutex> g(lock);
+        if (ap_mode_ == on)
+            return;
+        ap_mode_ = on;
+        fails_ = 0;
+    }
+    ESP_LOGW(TAG, "%s", on ? "access point mode" : "joining the network");
+    esp_timer_stop(retry_timer);
+    if (on) {
+        esp_wifi_disconnect();
+        open_ap();
+    } else {
+        // The access point stays until joined (close_timer)
+        retry(nullptr);
+    }
+}
+
+bool
+ap_mode()
+{
+    std::lock_guard<std::mutex> g(lock);
+    return ap_mode_;
+}
+
+std::string
+host()
+{
+    std::lock_guard<std::mutex> g(lock);
+    if (!ip_.empty())
+        return ip_;
+    return ap_on_ ? "192.168.4.1" : "";
 }
 
 bool
@@ -499,7 +616,7 @@ http_hook(httpd_req_t *req, esp_err_t *ret)
     if (!wifi_page) {
         // Not joined: the setup page instead of Mainsail
         bool root = strcmp(uri, "/") == 0 || strcmp(uri, "/index.html") == 0;
-        if (!(root && req->method == HTTP_GET && ip().empty()))
+        if (!(root && req->method == HTTP_GET && ip().empty() && !ap_mode()))
             return false;
         httpd_resp_set_status(req, "302 Found");
         httpd_resp_set_hdr(req, "Location", "/wifi");

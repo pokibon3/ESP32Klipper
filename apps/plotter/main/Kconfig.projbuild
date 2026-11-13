@@ -16,16 +16,16 @@ menu "Plotter"
         depends on PLOTTER_NETWORK
         default ""
     config PLOTTER_AP_PASSWORD
-        string "Setup access point password (empty = open)"
+        string "Access point password (empty = made per board)"
         depends on PLOTTER_NETWORK
         default ""
         help
-            Without a saved network, or when the board cannot join it, it
-            opens the access point ESP32Klipper-XXXX with the setup page
-            http://192.168.4.1/wifi (also on the touch screen: System ->
-            WiFi).  8 to 63 characters for WPA2; empty for an open access
-            point (anyone near can then reach the plotter while it is
-            open).
+            The board's own access point ESP32Klipper-XXXX: the setup one
+            (opens without a saved network, or when the board cannot join
+            it; setup page http://192.168.4.1/wifi) and access point mode
+            (Mainsail at http://192.168.4.1/).  8 to 63 characters; empty
+            = a password made once per board, shown on the touch screen
+            (System tab and System -> WiFi).
     config PLOTTER_HOSTNAME
         string "Host name"
         depends on PLOTTER_NETWORK
