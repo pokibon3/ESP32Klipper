@@ -1,6 +1,7 @@
 // M5Stack CoreS3 display + touch for LVGL (same interface as cyd_board).
 //
 //   ILI9342C 320x240 on SPI2: SCLK 36, MOSI 37, CS 3, DC 35
+//   microSD on the same bus: CS 4, MISO 35 (shared with the display's DC)
 //   Internal I2C (SDA 12, SCL 11): AXP2101 0x34 (power, backlight on
 //   DLDO1), AW9523 0x58 (LCD / touch reset), FT6336U touch 0x38
 //
@@ -19,6 +20,14 @@ struct UiTaskConfig {
     int stack = 5120;
     int lines = 20;    // display lines per draw buffer (320 * 2 bytes each)
 };
+
+// Power (AXP2101, AW9523) and the SPI bus; once, from any task.  Called by
+// start_ui() and mount_sd().
+bool board_init();
+
+// Mount the microSD card at path (FAT); false without a card.  The bus is
+// shared with the display (works while the screen runs).
+bool mount_sd(const char *path, int mhz = 20);
 
 // Start LVGL with the display and touch in a new task; build() runs in
 // that task (every LVGL call must be made from it).

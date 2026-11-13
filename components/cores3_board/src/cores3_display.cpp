@@ -12,6 +12,7 @@
 #include <atomic>
 #include <cstdio>
 #include <initializer_list>
+#include <mutex>
 #include <utility>
 
 #include "driver/gpio.h"
@@ -20,9 +21,15 @@
 #include "esp_heap_caps.h"
 #include "esp_lcd_io_spi.h"
 #include "esp_lcd_panel_io.h"
+#include "driver/sdspi_host.h"
+#include "esp_rom_gpio.h"
 #include "esp_timer.h"
+#include "esp_vfs_fat.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "sdmmc_cmd.h"
+#include "soc/spi_periph.h"
 #include "lvgl.h"
 #include "sdkconfig.h"
 
@@ -40,6 +47,7 @@ constexpr int W = 320, H = 240;
 
 constexpr gpio_num_t LCD_SCLK = GPIO_NUM_36, LCD_MOSI = GPIO_NUM_37,
                      LCD_CS = GPIO_NUM_3, LCD_DC = GPIO_NUM_35;
+constexpr gpio_num_t SD_CS = GPIO_NUM_4; // MISO is GPIO35 (= LCD DC)
 constexpr gpio_num_t I2C_SDA = GPIO_NUM_12, I2C_SCL = GPIO_NUM_11;
 constexpr uint8_t AXP2101 = 0x34, AW9523 = 0x58, FT6336 = 0x38;
 
@@ -56,6 +64,12 @@ std::atomic<uint32_t> flushes{0};
 TaskHandle_t ui_task_handle;
 UiMemory memory;
 lv_obj_t *touch_dot;
+// SPI2 is shared by the display and the microSD card, and GPIO35 is both
+// the display's DC (output) and the card's MISO (input): whoever uses the
+// bus holds this semaphore (a binary one: the display gives it back from
+// the end-of-transfer interrupt).
+SemaphoreHandle_t bus_sem;
+bool board_ok;
 
 /****************************************************************
  * I2C: power and IO expander
@@ -143,6 +157,7 @@ on_color_done(esp_lcd_panel_io_handle_t, esp_lcd_panel_io_event_data_t *,
 {
     lv_disp_flush_ready((lv_disp_drv_t *)ctx);
     BaseType_t woken = pdFALSE;
+    xSemaphoreGiveFromISR(bus_sem, &woken);
     vTaskNotifyGiveFromISR(ui_task_handle, &woken);
     return woken == pdTRUE;
 }
@@ -155,17 +170,32 @@ lcd_cmd(int cmd, std::initializer_list<uint8_t> data)
 }
 
 bool
-lcd_init()
+bus_init()
 {
+    // The card's CS high first: it must not take the display's traffic
+    gpio_config_t cs = {};
+    cs.pin_bit_mask = 1ULL << SD_CS;
+    cs.mode = GPIO_MODE_OUTPUT;
+    cs.pull_up_en = GPIO_PULLUP_ENABLE;
+    gpio_config(&cs);
+    gpio_set_level(SD_CS, 1);
     spi_bus_config_t bus = {};
     bus.sclk_io_num = LCD_SCLK;
     bus.mosi_io_num = LCD_MOSI;
-    bus.miso_io_num = -1; // GPIO35 is the DC line (shared MISO pin)
+    bus.miso_io_num = LCD_DC; // the card's MISO; the display drives it as DC
     bus.quadwp_io_num = -1;
     bus.quadhd_io_num = -1;
-    bus.max_transfer_sz = W * task_cfg.lines * 2 + 8;
+    bus.max_transfer_sz = 32768; // display draw buffers up to 51 lines
     if (spi_bus_initialize(SPI2_HOST, &bus, SPI_DMA_CH_AUTO) != ESP_OK)
         return false;
+    bus_sem = xSemaphoreCreateBinary();
+    xSemaphoreGive(bus_sem);
+    return true;
+}
+
+bool
+lcd_init()
+{
     esp_lcd_panel_io_spi_config_t io = {};
     io.cs_gpio_num = LCD_CS;
     io.dc_gpio_num = LCD_DC;
@@ -181,6 +211,7 @@ lcd_init()
         return false;
     // ILI9342C: the power-on defaults are fine for this panel; set the
     // pixel format, orientation and inversion
+    xSemaphoreTake(bus_sem, portMAX_DELAY);
     lcd_cmd(0x01, {}); // software reset
     vTaskDelay(pdMS_TO_TICKS(120));
     lcd_cmd(0x11, {}); // sleep out
@@ -191,12 +222,15 @@ lcd_init()
     lcd_cmd(0x21, {});
 #endif
     lcd_cmd(0x29, {}); // display on
+    xSemaphoreGive(bus_sem);
     return true;
 }
 
 void
 flush_cb(lv_disp_drv_t *, const lv_area_t *a, lv_color_t *px)
 {
+    // Given back by on_color_done
+    xSemaphoreTake(bus_sem, portMAX_DELAY);
     lcd_cmd(0x2A, {(uint8_t)(a->x1 >> 8), (uint8_t)a->x1, (uint8_t)(a->x2 >> 8),
                    (uint8_t)a->x2});
     lcd_cmd(0x2B, {(uint8_t)(a->y1 >> 8), (uint8_t)a->y1, (uint8_t)(a->y2 >> 8),
@@ -247,10 +281,8 @@ ui_task(void *)
 {
     ui_task_handle = xTaskGetCurrentTaskHandle();
     size_t heap0 = heap_caps_get_free_size(MALLOC_CAP_8BIT);
-    if (!power_init())
-        printf("cores3: power / IO expander setup failed\n");
     lv_init();
-    if (!lcd_init()) {
+    if (!board_init() || !lcd_init()) {
         printf("cores3: display init failed\n");
         vTaskDelete(nullptr);
         return;
@@ -301,7 +333,74 @@ ui_task(void *)
     }
 }
 
+/****************************************************************
+ * microSD card (SPI2, CS 4, MISO = GPIO35 = LCD DC)
+ ****************************************************************/
+
+esp_err_t (*sd_do_transaction)(int, sdmmc_command_t *);
+
+esp_err_t
+sd_transaction(int slot, sdmmc_command_t *cmd)
+{
+    xSemaphoreTake(bus_sem, portMAX_DELAY);
+    // GPIO35: input (MISO) while the card talks
+    gpio_set_direction(LCD_DC, GPIO_MODE_INPUT);
+    esp_rom_gpio_connect_in_signal(LCD_DC, spi_periph_signal[SPI2_HOST].spiq_in,
+                                   false);
+    esp_err_t e = sd_do_transaction(slot, cmd);
+    gpio_set_direction(LCD_DC, GPIO_MODE_OUTPUT);
+    xSemaphoreGive(bus_sem);
+    return e;
+}
+
 } // namespace
+
+bool
+board_init()
+{
+    static std::once_flag once;
+    std::call_once(once, [] {
+        bool power = power_init();
+        if (!power)
+            printf("cores3: power / IO expander setup failed\n");
+        board_ok = bus_init();
+        if (!board_ok)
+            printf("cores3: SPI bus setup failed\n");
+    });
+    return board_ok;
+}
+
+bool
+mount_sd(const char *path, int mhz)
+{
+    if (!board_init())
+        return false;
+    sdmmc_host_t host = SDSPI_HOST_DEFAULT();
+    host.slot = SPI2_HOST;
+    host.max_freq_khz = mhz * 1000;
+    sd_do_transaction = host.do_transaction;
+    host.do_transaction = sd_transaction;
+    sdspi_device_config_t dev = SDSPI_DEVICE_CONFIG_DEFAULT();
+    dev.gpio_cs = SD_CS;
+    dev.host_id = SPI2_HOST;
+    esp_vfs_fat_mount_config_t mc = {};
+    mc.format_if_mount_failed = false;
+    mc.max_files = 4;
+    mc.allocation_unit_size = 16 * 1024;
+    sdmmc_card_t *card;
+    esp_err_t e = esp_vfs_fat_sdspi_mount(path, &host, &dev, &mc, &card);
+    if (e != ESP_OK) {
+        printf("microSD: none (%s), using the internal storage\n",
+               esp_err_to_name(e));
+        gpio_set_direction(LCD_DC, GPIO_MODE_OUTPUT);
+        gpio_set_level(SD_CS, 1);
+        return false;
+    }
+    printf("microSD: %s, %llu MB\n", card->cid.name,
+           (unsigned long long)card->csd.capacity * card->csd.sector_size
+               / (1024 * 1024));
+    return true;
+}
 
 bool
 start_ui(std::function<void()> build, const UiTaskConfig &cfg)

@@ -4,6 +4,8 @@
 //     WiFi
 //   - CoreS3 also shows the touch screen of the CYD (PLOTTER_CORES3_SCREEN)
 //   - CYD (PLOTTER_CYD): touch screen + G-code files on the microSD card
+//   - CoreS3 microSD (PLOTTER_CORES3_SD): G-code files and printer.cfg on
+//     the card, like the CYD (Mainsail uploads go there too)
 //     (no WiFi: not enough RAM next to the plotter without PSRAM)
 //
 // Startup: storage (/data, microSD) -> WiFi -> printer.cfg -> UI / HTTP
@@ -27,9 +29,6 @@
 #include "esp_netif.h"
 #include "esp_timer.h"
 #include "esp_vfs_fat.h"
-#if CONFIG_PLOTTER_NETWORK
-#include "esp_wifi.h"
-#endif
 #if CONFIG_PLOTTER_CYD
 #include "driver/sdspi_host.h"
 #include "sdmmc_cmd.h"
@@ -45,6 +44,7 @@
 #if CONFIG_PLOTTER_NETWORK
 #include "moonraker/esp_server.hpp"
 #include "moonraker/moonraker.hpp"
+#include "wifi_setup.hpp"
 #endif
 #if CONFIG_PLOTTER_CYD
 #include "cyd_board/cyd_display.hpp"
@@ -52,6 +52,12 @@ namespace board = cyd;
 #elif CONFIG_PLOTTER_CORES3_SCREEN
 #include "cores3_board/cores3_display.hpp"
 namespace board = cores3;
+#endif
+#if CONFIG_PLOTTER_CORES3_SD
+#include "cores3_board/cores3_display.hpp"
+#endif
+#if CONFIG_PLOTTER_CYD || CONFIG_PLOTTER_CORES3_SD
+#define PLOTTER_SD 1
 #endif
 #if CONFIG_PLOTTER_CYD || CONFIG_PLOTTER_CORES3_SCREEN
 #define PLOTTER_SCREEN 1
@@ -108,9 +114,19 @@ mount_storage()
     return true;
 }
 
-#if CONFIG_PLOTTER_CYD
-// microSD card on SPI3 (CYD: SCK 18, MISO 19, MOSI 23, CS 5)
+#if PLOTTER_SD
 static const char *SD = "/sd";
+#endif
+
+#if CONFIG_PLOTTER_CORES3_SD
+// microSD card next to the display on SPI2 (cores3_board)
+static bool
+mount_sd()
+{
+    return cores3::mount_sd(SD, CONFIG_PLOTTER_SD_MHZ);
+}
+#elif CONFIG_PLOTTER_CYD
+// microSD card on SPI3 (CYD: SCK 18, MISO 19, MOSI 23, CS 5)
 
 static bool
 mount_sd()
@@ -148,6 +164,9 @@ mount_sd()
     return true;
 }
 
+#endif
+
+#if PLOTTER_SD
 static bool
 is_dir(const std::string &path)
 {
@@ -171,58 +190,6 @@ read_text(const std::string &path)
     return s;
 }
 
-#if CONFIG_PLOTTER_NETWORK
-/****************************************************************
- * WiFi
- ****************************************************************/
-
-static EventGroupHandle_t wifi_events;
-static char ip_text[20] = "";
-
-static void
-wifi_event(void *, esp_event_base_t base, int32_t id, void *data)
-{
-    if (base == WIFI_EVENT && id == WIFI_EVENT_STA_START) {
-        esp_wifi_connect();
-    } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
-        xEventGroupClearBits(wifi_events, 1);
-        esp_wifi_connect();
-    } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
-        auto *ev = (ip_event_got_ip_t *)data;
-        snprintf(ip_text, sizeof(ip_text), IPSTR, IP2STR(&ev->ip_info.ip));
-        xEventGroupSetBits(wifi_events, 1);
-    }
-}
-
-static bool
-start_wifi(int wait_ms)
-{
-    if (!strlen(CONFIG_PLOTTER_WIFI_SSID)) {
-        ESP_LOGW(TAG, "WiFi SSID not set (menuconfig: Plotter)");
-        return false;
-    }
-    wifi_events = xEventGroupCreate();
-    esp_netif_init();
-    esp_event_loop_create_default();
-    esp_netif_t *sta = esp_netif_create_default_wifi_sta();
-    esp_netif_set_hostname(sta, CONFIG_PLOTTER_HOSTNAME);
-    wifi_init_config_t ic = WIFI_INIT_CONFIG_DEFAULT();
-    esp_wifi_init(&ic);
-    esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, wifi_event, nullptr);
-    esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, wifi_event, nullptr);
-    wifi_config_t wc = {};
-    strncpy((char *)wc.sta.ssid, CONFIG_PLOTTER_WIFI_SSID, sizeof(wc.sta.ssid));
-    strncpy((char *)wc.sta.password, CONFIG_PLOTTER_WIFI_PASSWORD,
-            sizeof(wc.sta.password));
-    esp_wifi_set_mode(WIFI_MODE_STA);
-    esp_wifi_set_config(WIFI_IF_STA, &wc);
-    // Keep latency low for the WebSocket (no modem sleep)
-    esp_wifi_set_ps(WIFI_PS_NONE);
-    esp_wifi_start();
-    return xEventGroupWaitBits(wifi_events, 1, pdFALSE, pdTRUE,
-                               pdMS_TO_TICKS(wait_ms)) & 1;
-}
-#endif
 
 // FIRMWARE_RESTART, host side (after Printer::reset_mcu): start again
 static void
@@ -241,7 +208,25 @@ restart_board()
 static void
 start_screen(kl::Printer &p, const std::string &gcode_dir)
 {
+#if CONFIG_PLOTTER_NETWORK
+    // System -> WiFi on the screen
+    struct Backend : kl::PrinterUiBackend {
+        using kl::PrinterUiBackend::PrinterUiBackend;
+        bool wifi_supported() override { return true; }
+        std::string wifi_status() override { return wifi::status(); }
+        void wifi_scan_start() override { wifi::scan_start(); }
+        bool wifi_scan_results(std::vector<kl::WifiNetwork> *out) override {
+            return wifi::scan_results(out);
+        }
+        void wifi_connect(const std::string &ssid,
+                          const std::string &password) override {
+            wifi::join(ssid, password);
+        }
+    };
+    static Backend backend(p);
+#else
     static kl::PrinterUiBackend backend(p);
+#endif
     backend.restart_board = restart_board;
     static std::string files_line = "G-code files: " + gcode_dir;
     backend.info = [] {
@@ -253,8 +238,9 @@ start_screen(kl::Printer &p, const std::string &gcode_dir)
         l.push_back("Board: " CONFIG_IDF_TARGET);
 #endif
 #if CONFIG_PLOTTER_NETWORK
+        std::string ip = wifi::ip();
         snprintf(buf, sizeof(buf), "Mainsail: http://%s/",
-                 ip_text[0] ? ip_text : "(no WiFi)");
+                 ip.empty() ? "(no WiFi)" : ip.c_str());
         l.push_back(buf);
 #endif
         l.push_back(files_line);
@@ -351,22 +337,26 @@ klippy_task(void *)
     bool have_storage = mount_storage();
     std::string gcode_dir = "/data/gcodes";
     std::string cfg = "";
+    std::string config_dir = "/data/config";
 #if CONFIG_PLOTTER_CYD
     printf("\nESP32Klipper plotter (CYD: screen + microSD)\n");
+#endif
+#if PLOTTER_SD
     if (mount_sd()) {
         // G-code files in /gcodes or the card's root; printer.cfg in the
-        // root replaces the internal one
+        // root replaces the internal one (and Mainsail edits that one)
         gcode_dir = is_dir("/sd/gcodes") ? "/sd/gcodes" : SD;
         cfg = read_text("/sd/printer.cfg");
-        if (!cfg.empty())
+        if (!cfg.empty()) {
             printf("printer.cfg: from the microSD card\n");
+            config_dir = SD;
+        }
     }
     printf("G-code files: %s\n", gcode_dir.c_str());
 #endif
 #if CONFIG_PLOTTER_NETWORK
-    bool wifi = start_wifi(20000);
-    printf("\nESP32Klipper plotter: WiFi %s, http://%s/\n",
-           wifi ? "connected" : "not connected", ip_text);
+    wifi::start(20000);
+    printf("\nESP32Klipper plotter: %s\n", wifi::status().c_str());
 #endif
 
     std::string cfg_path = "/data/config/printer.cfg";
@@ -397,7 +387,17 @@ klippy_task(void *)
 #endif
     static kl::Printer p(opt);
     std::string err;
+#if CONFIG_SPIRAM
+    // The configuration (macros, sections) is many small blocks, which
+    // would all go to internal RAM (< SPIRAM_MALLOC_ALWAYSINTERNAL): a large
+    // printer.cfg took ~70 KB of it and the MCU link thread could not start.
+    // PSRAM first while it loads.
+    heap_caps_malloc_extmem_enable(0);
+#endif
     bool cfg_ok = p.load_config(cfg, &err);
+#if CONFIG_SPIRAM
+    heap_caps_malloc_extmem_enable(CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL);
+#endif
     cfg.clear();
     cfg.shrink_to_fit();
     if (!cfg_ok)
@@ -413,7 +413,7 @@ klippy_task(void *)
     auto gcodes = std::make_shared<kl::PosixFileSystem>(gcode_dir);
     p.set_filesystem(gcodes);
 #if CONFIG_PLOTTER_NETWORK
-    auto config = std::make_shared<kl::PosixFileSystem>("/data/config");
+    auto config = std::make_shared<kl::PosixFileSystem>(config_dir);
     kl::Moonraker::Options mo;
     mo.hostname = CONFIG_PLOTTER_HOSTNAME;
     mo.cpu = CONFIG_IDF_TARGET;
@@ -426,6 +426,8 @@ klippy_task(void *)
     kl::EspServerConfig sc;
     sc.www_dir = "/data/www";
     sc.hook = [](httpd_req_t *req, esp_err_t *ret) {
+        if (wifi::http_hook(req, ret))
+            return true;
         if (req->method != HTTP_GET
             || (strcmp(req->uri, "/server/files/klippy.log") != 0
                 && strcmp(req->uri, "/server/files/logs/klippy.log") != 0))

@@ -1,5 +1,5 @@
 idf_component_register(
-    SRCS main.cpp
+    SRCS main.cpp wifi_setup.cpp
     REQUIRES klippy klippy_lite mcu_link chelper moonraker link_tests
              esp_timer heap log nvs_flash esp_wifi esp_netif esp_event fatfs
              vfs pthread ui cyd_board cores3_board lvgl sdmmc esp_driver_sdspi

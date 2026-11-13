@@ -1,8 +1,10 @@
 # ESP32Klipper
 
+> **開発中です。** まだ SKR Pico の実機では一度も動かしておらず、仮想 MCU（Mac 上のプロセス）相手の試験しかしていません。設定項目・API・ファイル構成は予告なく変わります。実機のプロッタを動かす用途にはまだ使わないでください。
+
 CYD（ESP32-2432S028R）または M5Stack CoreS3 を Klipper のホストにして、Klipper 純正ファームの SKR Pico を UART で動かすペンプロッタ用コントローラ。設計は「CYD Klipper互換ホスト 全体設計書」を参照。
 
-現在の段階：**M1（性能測定）・M2（MCU 接続、1 軸駆動）・M3（CoreXY、printer.cfg、TMC2209、Input Shaper）が完了。M4 は原点復帰（センサレス含む）・Jinja2 マクロ・SD 実行（一時停止・再開・中止）・ローカル UI まで完了**（UI の実機での見え方・タッチは未確認）。残りは実 SD カードの読み込み。**M5（Moonraker 互換 API + Mainsail）は CoreS3 上で仮想 MCU 相手に動作確認済み**（2026-11-13）。
+現在の段階：**M1（性能測定）・M2（MCU 接続、1 軸駆動）・M3（CoreXY、printer.cfg、TMC2209、Input Shaper）が完了。M4 は原点復帰（センサレス含む）・Jinja2 マクロ・SD 実行（一時停止・再開・中止）・ローカル UI まで完了**（UI の実機での見え方・タッチは未確認）。残りは CYD での実 SD カードの読み込み。**M5（Moonraker 互換 API + Mainsail）は CoreS3 上で仮想 MCU 相手に動作確認済み**（2026-11-13）。CoreS3 は WiFi の設定（画面・設定用アクセスポイント）と microSD にも対応。
 
 SKR Pico 実機はまだ使っていない。MCU 側は、Klipper 本家の MCU コードを Mac 上のプロセスとして動かす「仮想 MCU」（`tools/sim_mcu/`）で検証している。
 
@@ -148,9 +150,32 @@ CoreS3 で見つけて直した問題
 | 印刷中に `MCU shutdown: Timer too close` | CYD 用に縮めた先読み（ステップを実行の約 50ms 前に送る）では、WiFi や USB の揺らぎで間に合わない。PSRAM のある基板では Klipper 本来の値（`buffer_time_high` 1.0、ステップ生成 0.45〜0.70 秒）に |
 | 起動時の原点復帰で `Timer too close` | drip 移動の前の待ち（`await_flush_time`）で使う `Printer::pause()` が、待っている間にステップを送っていなかった。本家の `reactor.pause()` と同じく、待つ間も `service()` を回すように |
 
+#### WiFi の設定
+
+接続先は NVS に保存し、無ければ menuconfig（`Plotter` → `WiFi SSID` / `WiFi password`）の値を使う。
+
+| 方法 | 手順 |
+| --- | --- |
+| 画面 | System タブ → WiFi → 一覧から選び、画面のキーボードでパスワードを入力 |
+| 設定用アクセスポイント | 保存した WiFi が無いか、20 秒つながらないと `ESP32Klipper-XXXX` を出す。スマホでつなぎ `http://192.168.4.1/` を開いて選ぶ。保存した WiFi へは 30 秒ごとに再接続を試し、つながった 1 分後に閉じる |
+| ブラウザ（接続中） | `http://<IP>/wifi` |
+
+- 設定用アクセスポイントのパスワードは menuconfig の `Setup access point password`。空（既定）だと誰でもつなげ、開いている間は Mainsail も操作できる。
+- アクセスポイントでの設定は未確認（画面と通常の接続は確認済み）。
+
+#### microSD カード（CoreS3）
+
+`PLOTTER_CORES3_SD`（既定で有効）。CYD と同じく、カードの一番上の `printer.cfg` が内蔵のものに代わり、G-code はカードの `/gcodes`（無ければ一番上）から読む。Mainsail からのアップロードと設定の編集もカードに入る。カードが無ければ内蔵ストレージ（`/data`）を使う。
+
+- カードは画面と同じ SPI2（CS 4）につながり、カードの MISO と画面の DC が同じ GPIO35。バスをセマフォで取り合い、カードの通信中だけ GPIO35 を入力に切り替える。画面を表示したまま読める。
+- 確認：32GB のカード、既存機の printer.cfg（マクロ多数）で起動し、仮想 MCU とのリンクまで動作。
+- 大きな printer.cfg を読むと内蔵 RAM を約 70KB 使い、MCU 通信のスレッドが作れずに落ちた。設定の読み込み中だけ PSRAM を優先させ（`heap_caps_malloc_extmem_enable(0)`）、起動後の内蔵 RAM の空きは 48KB → 105KB。
+
+起動時の内蔵 RAM の使い道（CoreS3、既存機の printer.cfg）：WiFi 78KB、画面 37KB、HTTP サーバー 29KB、printer.cfg 12KB（PSRAM 優先にする前は 68KB）、SD 3KB。
+
 ### 未対応
 
-- ESP32 の SD カードからの読み込み（`PosixFileSystem` を `/sdcard` に向ける）
+- Input Shaper の共振測定（`TEST_RESONANCES`、`SHAPER_CALIBRATE`）
 - TMC の位相オフセットの追跡、StallGuard の連続取得
 - SKR Pico 用の本物の MCU ファームのビルド（Homebrew の arm-none-eabi-gcc に newlib がないため。`brew install --cask gcc-arm-embedded` が必要）
 
