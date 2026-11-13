@@ -42,6 +42,25 @@ python3 tools/sim_mcu/build.py      # build/sim_mcu/sim_mcu を作る
 
 Mac 版の試験は、仮想 MCU を子プロセスとして起動して socketpair で接続する（ポート名 `sim:<パス>`）。
 
+#### 描いた内容を見る（`tools/plot_view.py`）
+
+仮想 MCU は、環境変数 `SIM_TRACE=<ファイル>`（`sim_bridge.py --trace <ファイル>` が設定する）があると、出力ピンの変化を時刻つきで書き出す（1 件 8 バイト）。`tools/plot_view.py` は printer.cfg から X・Y のステップと方向のピン、`rotation_distance`、キネマティクス（CoreXY / Cartesian）、ペンのピン（`[pwm_tool]` / `[output_pin]`、`--pen-pin` で指定も可）を読み、ペンを下ろした線を復元する。Python の標準ライブラリだけで動く。
+
+```sh
+# ESP32 + 仮想 MCU：記録しながら中継し、ブラウザで描画をリアルタイムに見る
+python3 tools/sim_bridge.py /dev/cu.usbmodemXXXX --trace build/sim_trace.bin --timeout 7200
+python3 tools/plot_view.py build/sim_trace.bin --cfg printer.cfg --serve 8770   # http://localhost:8770/
+# 画像にする（PNG と SVG）
+python3 tools/plot_view.py build/sim_trace.bin --cfg printer.cfg --png build/plot.png --svg build/plot.svg
+# Mac の試験でも同じ（例：SD 印刷の試験）
+SIM_TRACE=$PWD/build/sim_trace.bin ./build/host/m4_sdcard_test <printer.cfg> <file.gcode> 2000
+```
+
+- 表示：用紙の範囲（position_min〜max）、ペンを下ろした線、ヘッド位置（赤 = ペンが下）。0.2 秒ごとに更新し、中継を起動し直すと最初から描き直す
+- TMC2209 のステッパーは両エッジでステップする（本家と同じ判定：`step_pulse_duration` が 200ns 以下）
+- 原点は「ヘッドが行った一番小さい X・Y を原点復帰の位置（`position_endstop`）とする」推定
+- `card_opt.gcode`（Mac の SD 印刷試験、69 万回のピン変化）を正しく再現することを確認
+
 ### Mac での試験
 
 ```sh

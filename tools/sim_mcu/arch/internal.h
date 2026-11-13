@@ -19,5 +19,6 @@ void console_poll(int timeout_us);
 
 // gpio.c
 void sim_gpio_report(void);
+void sim_trace_flush(void);
 
 #endif // internal.h

@@ -47,6 +47,9 @@ def main():
     ap.add_argument("--log", default=os.path.join(root, "build",
                                                   "link_test_result.txt"))
     ap.add_argument("--timeout", type=float, default=600.0)
+    ap.add_argument("--trace", default="",
+                    help="write the simulated MCU's output pin changes to "
+                         "this file (tools/plot_view.py draws them)")
     args = ap.parse_args()
 
     ser = serial.Serial(args.port, args.baud, timeout=0)
@@ -77,9 +80,13 @@ def main():
 
     # Phase 2: relay between the UART and the simulated MCU
     host_end, sim_end = socket.socketpair()
+    env = dict(os.environ)
+    if args.trace:
+        open(args.trace, "wb").close() # new trace for this link
+        env["SIM_TRACE"] = os.path.abspath(args.trace)
     sim = subprocess.Popen([args.sim, "-F", str(sim_end.fileno())],
                            pass_fds=[sim_end.fileno()],
-                           stderr=subprocess.PIPE)
+                           stderr=subprocess.PIPE, env=env)
     sim_end.close()
     host_end.setblocking(False)
     sel = selectors.DefaultSelector()

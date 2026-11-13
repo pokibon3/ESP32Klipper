@@ -27,6 +27,7 @@ command_reset(uint32_t *args)
 {
     fprintf(stderr, "sim_mcu: reset\n");
     sim_gpio_report();
+    sim_trace_flush();
     execv(orig_argv[0], orig_argv);
     report_errno("execv", -1);
 }
@@ -37,6 +38,7 @@ on_sigint(int sig)
 {
     fprintf(stderr, "sim_mcu: exit\n");
     sim_gpio_report();
+    sim_trace_flush();
     exit(0);
 }
 

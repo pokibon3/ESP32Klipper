@@ -129,6 +129,8 @@ irq_wait(void)
     // return and let the main loop spin until the timer is due.
     int32_t diff = TimerInfo.next_wake - timer_read_time();
     int32_t us = diff / (CONFIG_CLOCK_FREQ / 1000000) - 1000;
+    if (us > 0)
+        sim_trace_flush(); // idle: the live view gets the last changes
     console_poll(us > 0 ? us : 0);
     irq_poll();
 }

@@ -8,6 +8,7 @@
 // This file may be distributed under the terms of the GNU GPLv3 license.
 
 #include <stdio.h> // fprintf
+#include <stdlib.h> // getenv
 #include "compiler.h" // container_of
 #include "board/irq.h" // irq_disable
 #include "board/misc.h" // timer_read_time
@@ -58,6 +59,46 @@ check_watches(uint8_t step_pin)
     }
 }
 
+// Pin trace (SIM_TRACE=file, tools/plot_view.py draws it): one 8-byte
+// record per output pin change, appended (survives the "reset" command's
+// re-exec): u32 clock (CONFIG_CLOCK_FREQ, wraps), u8 pin, u8 level,
+// u16 kind (0 = change, 1 = pin set up as output)
+static FILE *trace;
+static uint32_t trace_flushed;
+
+static void
+trace_pin(uint8_t pin, uint8_t level, uint16_t kind)
+{
+    static int inited;
+    if (!inited) {
+        inited = 1;
+        const char *path = getenv("SIM_TRACE");
+        if (path && *path) {
+            trace = fopen(path, "ab");
+            if (trace)
+                setvbuf(trace, NULL, _IOFBF, 64 * 1024);
+        }
+    }
+    if (!trace)
+        return;
+    uint32_t now = timer_read_time();
+    uint8_t rec[8] = {now, now >> 8, now >> 16, now >> 24, pin, level,
+                      kind, kind >> 8};
+    fwrite(rec, sizeof(rec), 1, trace);
+    // Flush often enough for a live view (every 50 ms of MCU time)
+    if (now - trace_flushed > CONFIG_CLOCK_FREQ / 20) {
+        trace_flushed = now;
+        fflush(trace);
+    }
+}
+
+void
+sim_trace_flush(void)
+{
+    if (trace)
+        fflush(trace);
+}
+
 static void
 set_level(struct sim_pin *p, uint8_t val)
 {
@@ -66,6 +107,8 @@ set_level(struct sim_pin *p, uint8_t val)
         p->edges++;
         p->level = val;
         check_watches(p - pins);
+        if (p->is_output)
+            trace_pin(p - pins, val, 0);
     }
     p->level = val;
 }
@@ -76,6 +119,7 @@ gpio_out_setup(uint32_t pin, uint8_t val)
     struct sim_pin *p = get_pin(pin);
     p->is_output = 1;
     p->level = !!val;
+    trace_pin(pin, p->level, 1);
     return (struct gpio_out){ .pin = pin };
 }
 
