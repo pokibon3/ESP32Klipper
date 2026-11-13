@@ -4,7 +4,7 @@
 
 Klipper のホスト（本家では Raspberry Pi 上の Python）を ESP32 に移植した、ペンプロッタ用のコントローラです。CYD（ESP32-2432S028R）または M5Stack CoreS3 が printer.cfg と G-code を読み、Klipper 純正ファームの MCU（SKR Pico など）を UART で動かします。Raspberry Pi は要りません。
 
-開発の経緯と試験結果は [docs/development.md](docs/development.md)、設計は「CYD Klipper互換ホスト 全体設計書」にあります。
+開発の経緯と試験結果は [docs/development.md](docs/development.md)、設計は [docs/design.md](docs/design.md) にあります。
 
 ## 機能
 

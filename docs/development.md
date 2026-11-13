@@ -1,6 +1,6 @@
 # ESP32Klipper 開発記録
 
-開発の経緯、試験の方法と結果、見つけて直した問題をまとめる。使い方は [README](../README.md)、設計は「CYD Klipper互換ホスト 全体設計書」を参照。
+開発の経緯、試験の方法と結果、見つけて直した問題をまとめる。使い方は [README](../README.md)、設計は [design.md](design.md) を参照。
 
 ## 進み具合
 
