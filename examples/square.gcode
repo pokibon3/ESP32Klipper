@@ -1,4 +1,5 @@
 ; ESP32Klipper sample: a 60 mm square and its diagonals (pen = SET_PIN LASER)
+G28 X Y
 G90
 G1 X40 Y40 F12000
 SET_PIN PIN=LASER VALUE=1

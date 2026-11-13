@@ -7,3 +7,4 @@ bench/sdkconfig.old
 /bench/data/*.cfg
 /.claude/
 .DS_Store
+__pycache__/

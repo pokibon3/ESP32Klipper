@@ -15,10 +15,11 @@ Cartesian, from printer.cfg) and the pen pin into pen up / down, then
 
 Only the Python standard library is used.
 
-The origin: the steppers' positions start at 0 when the simulated MCU
-starts; homing then moves the carriage to the minimum.  The drawing is
-placed so that the lowest X and Y the carriage reached are the axes'
-position_endstop (the homing position).
+The origin: the simulated MCU has no real endstops; its homing trigger
+(sim_trigger_on_steps / sim_set_input) fires the X / Y endstop or DIAG
+pin, and the trace records it.  At each trigger the axis is placed at
+its position_endstop, like the host does.  A trace without triggers is
+placed so that the lowest X and Y reached are the position_endstop.
 
 This file may be distributed under the terms of the GNU GPLv3 license.
 """
@@ -26,6 +27,8 @@ import argparse, json, os, re, struct, sys, threading, time, zlib
 import http.server
 
 CLOCK_FREQ = 12000000
+# Changes when the viewer restarts: an open page then reloads itself
+SERVER_ID = "%x" % int(time.time() * 1000)
 MIN_BOTH_EDGE_DURATION = 0.000000200
 
 
@@ -86,6 +89,20 @@ class Stepper:
                       for s in cfg if len(s.split()) == 2)
         self.both_edges = has_tmc and (pulse is None
                                        or float(pulse) <= MIN_BOTH_EDGE_DURATION)
+        # Homing trigger pin: endstop_pin, or the TMC DIAG pin for a
+        # virtual endstop
+        self.trig_pin = self.trig_inv = None
+        ep = sec.get("endstop_pin", "")
+        if "virtual_endstop" in ep:
+            tmc = next((cfg[s] for s in cfg if len(s.split()) == 2
+                        and s.split()[0].startswith("tmc")
+                        and s.split()[1] == name), {})
+            ep = tmc.get("diag_pin", "")
+        if ep:
+            try:
+                self.trig_pin, self.trig_inv = parse_pin(ep)
+            except SystemExit:
+                pass
         self.pos = 0  # steps
 
 
@@ -120,12 +137,25 @@ class Plot:
         self.by_step = {self.sx.step_pin: self.sx, self.sy.step_pin: self.sy}
         self.levels = {}
         self.pen = False
-        self.lines = []        # [[(x, y), ...], ...] raw coordinates
+        self.lines = []        # [[(x, y), ...], ...] printer coordinates
         self.cur = None        # current pen-down polyline
         self.minx = self.miny = None
+        self.ox = self.oy = 0. # raw -> printer offset (set by homing)
+        self.anchored = False
+        self.homings = 0
         self.records = 0
         self.last_clock = None
         self.time = 0.         # seconds since the trace started
+        self.gen = getattr(self, "gen", 0) + 1
+
+    def clear(self):
+        """Forget the lines drawn so far (the live view's Clear)."""
+        with self.lock:
+            self.lines = []
+            if self.cur is not None:
+                self.cur = [self.pxy()]
+                self.lines.append(self.cur)
+            self.gen += 1
 
     def xy(self):
         a = self.sx.pos * self.sx.step_dist
@@ -134,8 +164,13 @@ class Plot:
             return (a + b) * .5, (a - b) * .5
         return a, b
 
-    def _point(self, force=False):
+    def pxy(self):
+        """Position in printer coordinates (before any homing: raw)."""
         x, y = self.xy()
+        return x + self.ox, y + self.oy
+
+    def _point(self, force=False):
+        x, y = self.pxy()
         if self.minx is None or x < self.minx:
             self.minx = x
         if self.miny is None or y < self.miny:
@@ -144,6 +179,16 @@ class Plot:
             lx, ly = self.cur[-1]
             if force or abs(x - lx) + abs(y - ly) >= self.min_seg:
                 self.cur.append((x, y))
+
+    def _home(self, st):
+        """Homing trigger: this axis is at its position_endstop now."""
+        x, y = self.xy()
+        if st is self.sx:
+            self.ox = st.endstop - x
+        else:
+            self.oy = st.endstop - y
+        self.anchored = True
+        self.homings += 1
 
     def feed(self, data):
         """Process complete 8-byte records; returns the bytes used."""
@@ -157,6 +202,13 @@ class Plot:
                     self.time += ((clock - self.last_clock) & 0xffffffff) \
                         / CLOCK_FREQ
                 self.last_clock = clock
+                if kind in (2, 3):
+                    # input forced by the simulation: a homing trigger?
+                    if kind == 2:
+                        for st in (self.sx, self.sy):
+                            if st.trig_pin == pin and level ^ st.trig_inv:
+                                self._home(st)
+                    continue
                 old = self.levels.get(pin)
                 self.levels[pin] = level
                 if kind != 0:
@@ -171,7 +223,7 @@ class Plot:
                 elif pin == self.pen_pin and old != level:
                     down = bool(level) != self.pen_inv
                     if down and not self.pen:
-                        self.cur = [self.xy()]
+                        self.cur = [self.pxy()]
                         self.lines.append(self.cur)
                     elif not down and self.pen:
                         self._point(force=True)
@@ -180,7 +232,10 @@ class Plot:
         return n * 8
 
     def origin(self):
-        """Offset raw -> printer coordinates (homing position = min)."""
+        """Extra offset for drawing: none after a homing trigger, else
+        the lowest position reached is taken as the homing position."""
+        if self.anchored:
+            return 0., 0.
         ox = (self.sx.endstop - self.minx) if self.minx is not None else 0.
         oy = (self.sy.endstop - self.miny) if self.miny is not None else 0.
         return ox, oy
@@ -286,15 +341,18 @@ PAGE = r"""<!doctype html><html><head><meta charset="utf-8">
 body{margin:0;background:var(--bg);color:var(--muted);
 font:13px system-ui,sans-serif;display:flex;flex-direction:column;
 height:100vh}
-#bar{padding:6px 12px;display:flex;gap:16px;flex-wrap:wrap}
+#bar{padding:6px 12px;display:flex;gap:16px;flex-wrap:wrap;
+align-items:center}
+button{font:inherit;padding:3px 12px;border-radius:5px;cursor:pointer;
+border:1px solid var(--edge);background:var(--paper);color:inherit}
 canvas{flex:1;min-height:0;width:100%}
 </style></head><body>
-<div id="bar"><span id="pos"></span><span id="pen"></span>
-<span id="info"></span></div><canvas id="c"></canvas>
+<div id="bar"><button id="clear">Clear</button><span id="pos"></span>
+<span id="pen"></span><span id="info"></span></div><canvas id="c"></canvas>
 <script>
 const cv=document.getElementById('c'),cx=cv.getContext('2d');
 let lines=[],bed=[0,0,100,100],org=[0,0],head=[0,0],pen=false,
-    nLines=0,nPts=0,trail=[];
+    nLines=0,nPts=0,gen=-1,server=null;
 function css(v){return getComputedStyle(document.documentElement)
   .getPropertyValue(v).trim()}
 function draw(){
@@ -321,9 +379,12 @@ function draw(){
 }
 async function poll(){
   try{
-    const r=await fetch('data?lines='+nLines+'&pts='+nPts);
+    const r=await fetch('data?lines='+nLines+'&pts='+nPts+'&gen='+gen);
     const j=await r.json();
+    if(server&&j.server!==server){location.reload();return}
+    server=j.server;
     if(j.reset){lines=[];}
+    gen=j.gen;
     if(j.reset||j.org[0]!==org[0]||j.org[1]!==org[1])org=j.org;
     bed=j.bed;head=j.head;pen=j.pen;
     if(j.tail.length&&lines.length)lines[lines.length-1].push(...j.tail);
@@ -338,6 +399,8 @@ async function poll(){
   }catch(e){}
   setTimeout(poll,200);
 }
+document.getElementById('clear').onclick=async()=>{
+  await fetch('clear',{method:'POST'});lines=[];nLines=nPts=0;draw()};
 addEventListener('resize',draw);poll();
 </script></body></html>"""
 
@@ -382,8 +445,9 @@ def serve(plot, path, port):
                          self.path.partition("?")[2].split("&") if "=" in p)
                 n_lines = int(q.get("lines", 0))
                 n_pts = int(q.get("pts", 0))
+                gen = int(q.get("gen", -1))
                 with plot.lock:
-                    reset = n_lines > len(plot.lines) or (
+                    reset = gen != plot.gen or n_lines > len(plot.lines) or (
                         n_lines and n_pts > len(plot.lines[n_lines - 1]))
                     if reset:
                         n_lines = n_pts = 0
@@ -391,8 +455,10 @@ def serve(plot, path, port):
                                 if n_lines else [])
                     new = [list(l) for l in plot.lines[n_lines:]]
                     last = plot.lines[-1] if plot.lines else []
-                    x, y = plot.xy()
+                    x, y = plot.pxy()
                     body = {
+                        "server": SERVER_ID,
+                        "gen": plot.gen, "homings": plot.homings,
                         "reset": reset, "org": plot.origin(),
                         "bed": plot.bed(), "head": (x, y), "pen": plot.pen,
                         "tail": tail_pts, "lines": new,
@@ -406,6 +472,16 @@ def serve(plot, path, port):
             else:
                 self.send_error(404)
                 return
+            self.reply(data, ctype)
+
+        def do_POST(self):
+            if self.path != "/clear":
+                self.send_error(404)
+                return
+            plot.clear()
+            self.reply(b"{}", "application/json")
+
+        def reply(self, data, ctype):
             self.send_response(200)
             self.send_header("Content-Type", ctype)
             self.send_header("Cache-Control", "no-store")
@@ -413,9 +489,14 @@ def serve(plot, path, port):
             self.end_headers()
             self.wfile.write(data)
 
-    # Without SO_REUSEADDR: on macOS 127.0.0.1:PORT would bind next to
-    # another server on *:PORT, and the browser would reach that one
-    http.server.ThreadingHTTPServer.allow_reuse_address = False
+    # On macOS 127.0.0.1:PORT binds next to another server on *:PORT (and
+    # the browser reaches that one): refuse a port something answers on
+    import socket
+    with socket.socket() as probe:
+        probe.settimeout(0.5)
+        if probe.connect_ex(("127.0.0.1", port)) == 0:
+            sys.exit("port %d is in use by another program; pick another "
+                     "--serve port" % port)
     srv = http.server.ThreadingHTTPServer(("127.0.0.1", port), H)
     print("live view: http://localhost:%d/  (trace %s)" % (port, path))
     srv.serve_forever()
@@ -440,9 +521,9 @@ def main():
         return
     read_trace(a.trace, plot)
     ox, oy = plot.origin()
-    print("%d pin changes, %.1f s, %d strokes; steps X %d Y %d"
-          % (plot.records, plot.time, len(plot.lines), plot.sx.pos,
-             plot.sy.pos))
+    print("%d pin changes, %.1f s, %d strokes, %d homing triggers%s"
+          % (plot.records, plot.time, len(plot.lines), plot.homings,
+             "" if plot.anchored else " (origin estimated)"))
     if a.png:
         write_png(plot, a.png, a.ppmm)
         print("wrote", a.png)

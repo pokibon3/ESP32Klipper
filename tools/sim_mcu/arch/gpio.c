@@ -42,6 +42,8 @@ static struct step_watch {
     uint32_t remaining;
 } watches[NUM_WATCH];
 
+static void trace_pin(uint8_t pin, uint8_t level, uint16_t kind);
+
 static void
 check_watches(uint8_t step_pin)
 {
@@ -55,6 +57,7 @@ check_watches(uint8_t step_pin)
             pins[w->pin].forced = 1;
             pins[w->pin].forced_level = w->value;
             w->active = 0;
+            trace_pin(w->pin, w->value, 2);
         }
     }
 }
@@ -62,7 +65,8 @@ check_watches(uint8_t step_pin)
 // Pin trace (SIM_TRACE=file, tools/plot_view.py draws it): one 8-byte
 // record per output pin change, appended (survives the "reset" command's
 // re-exec): u32 clock (CONFIG_CLOCK_FREQ, wraps), u8 pin, u8 level,
-// u16 kind (0 = change, 1 = pin set up as output)
+// u16 kind (0 = change, 1 = pin set up as output, 2 = input forced by the
+// simulation (endstop / DIAG trigger), 3 = input released)
 static FILE *trace;
 static uint32_t trace_flushed;
 
@@ -187,6 +191,8 @@ command_sim_set_input(uint32_t *args)
     struct sim_pin *p = get_pin(args[0]);
     p->forced = args[1];
     p->forced_level = !!args[2];
+    trace_pin(args[0], p->forced ? p->forced_level : p->level,
+              p->forced ? 2 : 3);
 }
 DECL_COMMAND_FLAGS(command_sim_set_input, HF_IN_SHUTDOWN,
                    "sim_set_input pin=%c forced=%c value=%c");
@@ -207,6 +213,7 @@ delayed_event(struct timer *t)
     p->forced = 1;
     p->forced_level = d->value;
     d->active = 0;
+    trace_pin(d->pin, d->value, 2);
     return SF_DONE;
 }
 

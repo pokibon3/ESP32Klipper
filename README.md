@@ -56,9 +56,10 @@ python3 tools/plot_view.py build/sim_trace.bin --cfg printer.cfg --png build/plo
 SIM_TRACE=$PWD/build/sim_trace.bin ./build/host/m4_sdcard_test <printer.cfg> <file.gcode> 2000
 ```
 
-- 表示：用紙の範囲（position_min〜max）、ペンを下ろした線、ヘッド位置（赤 = ペンが下）。0.2 秒ごとに更新し、中継を起動し直すと最初から描き直す
+- 表示：用紙の範囲（position_min〜max）、ペンを下ろした線、ヘッド位置（赤 = ペンが下）。0.2 秒ごとに更新し、中継を起動し直すと最初から描き直す。Clear ボタンでそれまでの線を消す。ビューアを起動し直すと、開いているページは自動で再読み込みする
 - TMC2209 のステッパーは両エッジでステップする（本家と同じ判定：`step_pulse_duration` が 200ns 以下）
-- 原点は「ヘッドが行った一番小さい X・Y を原点復帰の位置（`position_endstop`）とする」推定
+- 原点：仮想 MCU は原点復帰の DIAG / エンドストップを入れた瞬間も記録し、ビューアはそのたびにその軸を `position_endstop` に合わせる（仮想 MCU の原点復帰は歩数で DIAG を入れるので、原点復帰ごとに原点がずれる）。記録に原点復帰が無いときは、ヘッドが行った一番小さい X・Y を原点とみなす
+- 使用中のポートを `--serve` に指定するとエラーで止まる（macOS では別のサーバーと同じポートで起動できてしまい、ブラウザがそちらにつながるため）
 - `card_opt.gcode`（Mac の SD 印刷試験、69 万回のピン変化）を正しく再現することを確認
 
 ### Mac での試験
@@ -147,14 +148,37 @@ LVGL 8.4（`third_party/lvgl`、無改変）で 320×240 の画面を作る。�
 
 `apps/plotter` を CoreS3 向け（`PLOTTER_NETWORK`）にビルドすると、WiFi に接続し、`http://<IP>/` で Mainsail、`/websocket` と HTTP で Moonraker 互換 API を提供する。画面には CYD と同じ LVGL の UI を出す。
 
-```sh
-python3 tools/make_plotter_fs.py                 # Mainsail・printer.cfg・G-code を build/plotter_fs に用意
-cd apps/plotter
-PLOTTER_FLASH_FS=1 idf.py -B ../../build/plotter_s3_sim -DSDKCONFIG=../../build/plotter_s3_sim/sdkconfig build
-# 書き込み後、仮想 MCU と中継（MCU の通信は USB の usbjtag を共用）
-python ../../tools/sim_bridge.py /dev/cu.usbmodemXXXX --log ../../build/plotter_s3_result.txt --timeout 1800
-python3 ../../tools/moonraker_check.py <IP>:80
-```
+#### 仮想 MCU で動かす手順（CoreS3）
+
+SKR Pico がなくても、Mac 上の仮想 MCU を相手に CoreS3 で印刷まで動かせる。MCU との通信は CoreS3 の USB（usbjtag）を共用し、Mac の `tools/sim_bridge.py` が仮想 MCU に中継する。
+
+1. 準備（最初の 1 回）
+   ```sh
+   git clone --depth 1 https://github.com/Klipper3d/klipper.git third_party/klipper
+   python3 tools/sim_mcu/build.py        # build/sim_mcu/sim_mcu
+   python3 tools/make_plotter_fs.py      # Mainsail・printer.cfg・G-code を build/plotter_fs に（Mainsail のリリース zip を build/mainsail に展開しておく）
+   ```
+   `sim_bridge.py` には pyserial が要る（ESP-IDF の Python 環境には入っている）。
+2. 仮想 MCU 用のファームをビルドする。`sdkconfig.sim` で MCU ポートが `usbjtag` になり、起動後に `square.gcode` を自動で印刷し、原点復帰の DIAG を仮想 MCU に入れさせる。WiFi は menuconfig の `Plotter` で設定する（画面や設定用アクセスポイントで後から変えてもよい）
+   ```sh
+   . ~/esp/esp-idf-v5.4.2/export.sh
+   cd apps/plotter
+   idf.py -B ../../build/plotter_s3_sim -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.sim" set-target esp32s3
+   idf.py -B ../../build/plotter_s3_sim menuconfig      # Plotter → WiFi SSID / password
+   PLOTTER_FLASH_FS=1 idf.py -B ../../build/plotter_s3_sim -p /dev/cu.usbmodemXXXX flash   # 2 回目からは app-flash（/data を消さない）
+   cd ../..
+   ```
+3. 中継を起動する。CoreS3 をリセットし、`@@LINK_START@@` の後は USB を仮想 MCU につなぐ。中継を起動し直すと CoreS3 も再起動する
+   ```sh
+   python3 tools/sim_bridge.py /dev/cu.usbmodemXXXX --log build/plotter_s3_result.txt --timeout 7200 --trace build/sim_trace.bin
+   ```
+   - `--timeout` 秒で終わる（既定 600 秒）。`--trace` は描いた内容の記録（下の `plot_view.py` 用）
+   - CoreS3 が再起動すると（画面の Restart や `FIRMWARE_RESTART` も）中継は終わるので、起動し直す
+   - 起動時のログ（IP アドレスなど）は `--log` のファイルに入る。リンク中のログは `http://<IP>/server/files/klippy.log`
+4. 使う
+   - Mainsail：`http://<IP>/`、API の確認：`python3 tools/moonraker_check.py <IP>:80`
+   - 描いている様子：`python3 tools/plot_view.py build/sim_trace.bin --cfg <printer.cfg> --serve 8770` → `http://localhost:8770/`
+   - ファイルを送って印刷：`curl -F "file=@examples/square.gcode" http://<IP>/server/files/upload`、`curl -X POST "http://<IP>/printer/print/start?filename=square.gcode"`
 
 - MCU が USB を共用している間はコンソールの出力を RAM（PSRAM 128KB）に溜め、`/server/files/klippy.log` で読める。MCU が停止（shutdown）したときは、本家と同じく直近 100 件の送受信（`Dumping send queue` など）も書き出す。
 - 結果（2026-11-13、CoreS3 + 仮想 MCU）：再起動 6 回すべてで、起動時の原点復帰と自動印刷が完了し、`moonraker_check.py` は失敗 0。続けて 1 分間に `square.gcode` を 11 回印刷しても停止なし。
